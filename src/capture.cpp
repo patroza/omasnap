@@ -239,6 +239,60 @@ bool parseMonitor(const QByteArray &json, MonitorInfo &monitor,
   return false;
 }
 
+bool parseNiriMonitor(const QByteArray &outputJson,
+                      const QByteArray &workspacesJson, MonitorInfo &monitor,
+                      QString &error) {
+  QJsonParseError parseError;
+  const QJsonDocument outputDocument =
+      QJsonDocument::fromJson(outputJson, &parseError);
+  if (parseError.error != QJsonParseError::NoError ||
+      !outputDocument.isObject()) {
+    error = QStringLiteral("Could not parse Niri focused output: %1")
+                .arg(parseError.errorString());
+    return false;
+  }
+
+  const QJsonObject output = outputDocument.object();
+  const QJsonObject logical = output.value(QStringLiteral("logical")).toObject();
+  const qreal scale = logical.value(QStringLiteral("scale")).toDouble(1.0);
+  const int logicalWidth = logical.value(QStringLiteral("width")).toInt();
+  const int logicalHeight = logical.value(QStringLiteral("height")).toInt();
+  int pixelWidth = qRound(logicalWidth * scale);
+  int pixelHeight = qRound(logicalHeight * scale);
+  const QJsonArray modes = output.value(QStringLiteral("modes")).toArray();
+  const int currentMode = output.value(QStringLiteral("current_mode")).toInt(-1);
+  if (currentMode >= 0 && currentMode < modes.size()) {
+    const QJsonObject mode = modes.at(currentMode).toObject();
+    pixelWidth = mode.value(QStringLiteral("width")).toInt(pixelWidth);
+    pixelHeight = mode.value(QStringLiteral("height")).toInt(pixelHeight);
+  }
+
+  monitor.name = output.value(QStringLiteral("name")).toString();
+  monitor.geometry = {logical.value(QStringLiteral("x")).toInt(),
+                      logical.value(QStringLiteral("y")).toInt(), logicalWidth,
+                      logicalHeight};
+  monitor.pixelSize = {pixelWidth, pixelHeight};
+  monitor.scale = scale;
+
+  const QJsonDocument workspacesDocument =
+      QJsonDocument::fromJson(workspacesJson);
+  if (workspacesDocument.isArray()) {
+    for (const QJsonValue value : workspacesDocument.array()) {
+      const QJsonObject workspace = value.toObject();
+      if (workspace.value(QStringLiteral("is_focused")).toBool()) {
+        monitor.workspaceId = workspace.value(QStringLiteral("id")).toInt();
+        break;
+      }
+    }
+  }
+
+  if (monitor.name.isEmpty() || logicalWidth <= 0 || logicalHeight <= 0) {
+    error = QStringLiteral("Niri did not report a usable focused output");
+    return false;
+  }
+  return true;
+}
+
 QVector<WindowTarget> parseWindows(const QByteArray &json,
                                    const MonitorInfo &monitor) {
   QVector<WindowTarget> result;
@@ -744,7 +798,25 @@ void paintCaptureBackground(QPainter &painter, const QRectF &bounds,
 }
 
 bool probeFocusedMonitor(MonitorInfo &monitor, QString &error) {
-  StartupTimingScope timing("hyprctl monitors + parse");
+  StartupTimingScope timing("focused monitor probe + parse");
+  if (!qEnvironmentVariable("NIRI_SOCKET").isEmpty()) {
+    const ProcessResult output =
+        runProcess(QStringLiteral("niri"),
+                   {QStringLiteral("msg"), QStringLiteral("--json"),
+                    QStringLiteral("focused-output")});
+    const ProcessResult workspaces =
+        runProcess(QStringLiteral("niri"),
+                   {QStringLiteral("msg"), QStringLiteral("--json"),
+                    QStringLiteral("workspaces")});
+    if (!output.finished || output.exitCode != 0 ||
+        !parseNiriMonitor(output.output, workspaces.output, monitor, error)) {
+      if (error.isEmpty())
+        error = QString::fromUtf8(output.error).trimmed();
+      return false;
+    }
+    return true;
+  }
+
   const ProcessResult monitors =
       runProcess(QStringLiteral("hyprctl"),
                  {QStringLiteral("monitors"), QStringLiteral("-j")});
@@ -769,8 +841,9 @@ bool captureMonitorPixels(const MonitorInfo &monitor, CaptureData &capture,
 
   // Window discovery is independent of the screen grab, so let the hyprctl
   // round trip overlap the in-process output capture.
+  const bool niri = !qEnvironmentVariable("NIRI_SOCKET").isEmpty();
   QProcess clients;
-  if (includeWindows) {
+  if (includeWindows && !niri) {
     clients.setProcessChannelMode(QProcess::SeparateChannels);
     clients.start(QStringLiteral("hyprctl"),
                   {QStringLiteral("clients"), QStringLiteral("-j")});
@@ -786,6 +859,34 @@ bool captureMonitorPixels(const MonitorInfo &monitor, CaptureData &capture,
                   .arg(testCapture);
       return false;
     }
+  } else if (niri) {
+    const QString grimGeometry = QStringLiteral("%1,%2 %3x%4")
+                                     .arg(geometry.x())
+                                     .arg(geometry.y())
+                                     .arg(geometry.width())
+                                     .arg(geometry.height());
+    const ProcessResult grim = runProcess(
+        QStringLiteral("grim"),
+        {QStringLiteral("-t"), QStringLiteral("ppm"), QStringLiteral("-s"),
+         QString::number(capture.monitor.scale, 'g', 8), QStringLiteral("-g"),
+         grimGeometry, QStringLiteral("-")},
+        {}, 10000);
+    if (!grim.finished || grim.exitCode != 0) {
+      QString detail = QString::fromUtf8(grim.error).trimmed();
+      if (detail.isEmpty())
+        detail = grim.finished
+                     ? QStringLiteral("grim exited with code %1").arg(grim.exitCode)
+                     : QStringLiteral("grim did not finish in time");
+      error = QStringLiteral("Screen capture failed: %1").arg(detail);
+      return false;
+    }
+    if (!capture.source.loadFromData(grim.output, "PPM")) {
+      error = QStringLiteral(
+                  "Screen capture failed: could not decode %1 bytes of PPM data "
+                  "from grim")
+                  .arg(grim.output.size());
+      return false;
+    }
   } else if (!captureOutputSurface(monitor, capture.source, error)) {
     if (!error.startsWith(QStringLiteral("Screen capture failed:")))
       error = QStringLiteral("Screen capture failed: %1").arg(error);
@@ -795,7 +896,7 @@ bool captureMonitorPixels(const MonitorInfo &monitor, CaptureData &capture,
 
   capture.previewSize = geometry.size();
 
-  if (includeWindows) {
+  if (includeWindows && !niri) {
     if (!clients.waitForFinished(10000))
       clients.kill();
     else if (clients.exitCode() == 0)

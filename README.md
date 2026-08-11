@@ -1,6 +1,6 @@
 # Omasnap
 
-A native Wayland screenshot and annotation overlay designed for Omarchy and Hyprland.
+A native Wayland screenshot and annotation overlay designed for Omarchy, Hyprland, and Niri.
 It captures the focused monitor before mapping an exclusive layer-shell surface, so the
 editor never appears in its own screenshot. The editor retains annotations as movable,
 resizable vector layers and preserves the monitor's native pixels on scaled displays.
@@ -42,18 +42,22 @@ resizable vector layers and preserves the monitor's native pixels on scaled disp
 
 ## Platform scope
 
-The supported target is **Wayland + Hyprland**, with Omarchy as the primary integration.
-The renderer, layer surface, clipboard, and monitor capture use Wayland protocols;
-monitor/window discovery currently calls `hyprctl`. The focused output is captured
-in-process through `ext-image-copy-capture` before the layer maps. Selection displays
-that captured frame, while the annotation editor uses
+The supported targets are **Wayland + Hyprland** and **Wayland + Niri**, with Omarchy as
+the primary Hyprland integration. The renderer, layer surface, clipboard, and monitor
+capture use Wayland protocols. Discovery uses `hyprctl` on Hyprland and `niri msg` on
+Niri. The focused output is captured in-process through `ext-image-copy-capture` before
+the layer maps. Selection displays that captured frame, while the annotation editor uses
 a translucent layer scrim over the live desktop and draws only the selected capture.
+
+Niri currently supports region and full-output modes. Keep window capture on Niri's native
+`screenshot-window` action: Niri does not expose the image-copy protocol used for Omasnap's
+clean interactive window capture, and Omasnap intentionally does not substitute a desktop crop.
 Another Wayland compositor could support the application after supplying equivalent
 monitor and window discovery; generic Wayland support is not claimed by 1.0.
 
 Runtime commands used by the application:
 
-- `hyprctl`
+- `hyprctl` on Hyprland, or `niri` on Niri
 - `wl-copy` and `wl-paste`
 - `tesseract`
 - `omarchy-notification-send` when available; saved captures include a thumbnail and

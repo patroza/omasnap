@@ -111,7 +111,7 @@ int main(int argc, char **argv) {
 
   QCommandLineParser parser;
   parser.setApplicationDescription(QStringLiteral(
-      "Native Wayland screenshot and annotation overlay for Hyprland and "
+      "Native Wayland screenshot and annotation overlay for Hyprland, Niri, and "
       "Omarchy.\n"
       "\n"
       "Only one capture overlay runs at a time. Starting omasnap again while "
