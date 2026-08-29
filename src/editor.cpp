@@ -442,15 +442,11 @@ QString formatPixelPoint(const QPointF &point) {
  * opposite side instead of clipping at an overlay edge. Digits use the fixed
  * font so a live drag does not jitter the pill width per frame.
  */
-void drawMeasureBadge(QPainter &painter, const QRect &bounds,
-                      const QPointF &cursor, const QString &text) {
+QRectF measureBadgeRect(const QRect &bounds, const QPointF &cursor,
+                        const QString &text, const QFont &font) {
   if (text.isEmpty())
-    return;
-  QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-  font.setPixelSize(12);
-  font.setBold(true);
-  painter.setFont(font);
-  const qreal width = painter.fontMetrics().horizontalAdvance(text) + 16;
+    return {};
+  const qreal width = QFontMetricsF(font).horizontalAdvance(text) + 16;
   constexpr qreal height = 22;
   constexpr qreal gap = 15;
   constexpr qreal margin = 6;
@@ -460,11 +456,22 @@ void drawMeasureBadge(QPainter &painter, const QRect &bounds,
   qreal y = cursor.y() + gap;
   if (y + height > bounds.height() - margin)
     y = cursor.y() - gap - height;
-  const QRectF pill(
+  return QRectF(
       std::clamp(x, margin, std::max(margin, bounds.width() - width - margin)),
       std::clamp(y, margin,
                  std::max(margin, bounds.height() - height - margin)),
       width, height);
+}
+
+void drawMeasureBadge(QPainter &painter, const QRect &bounds,
+                      const QPointF &cursor, const QString &text) {
+  if (text.isEmpty())
+    return;
+  QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+  font.setPixelSize(12);
+  font.setBold(true);
+  painter.setFont(font);
+  const QRectF pill = measureBadgeRect(bounds, cursor, text, font);
   painter.setPen(QPen(QColor(255, 255, 255, 42), 1));
   painter.setBrush(QColor(12, 12, 15, 235));
   painter.drawRoundedRect(pill, 6, 6);
@@ -3521,6 +3528,9 @@ void CaptureEditor::keyReleaseEvent(QKeyEvent *event) {
 }
 
 void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
+  const QPointF previousCursor = cursor_;
+  const bool previousRecentsOpen = recentsOpen_;
+  const int previousHoveredRecent = hoveredRecent_;
   if (panning_) {
     panView(event->position() - panAnchor_);
     panAnchor_ = event->position();
@@ -3802,7 +3812,47 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
     }
   }
   updatePointerCursor();
-  update();
+  // An idle region-selection move changes only the crosshair, measurement
+  // badge, tabs, and (occasionally) recent-card hover. Asking QWidget to
+  // invalidate the full output here is particularly expensive on HiDPI 6K
+  // screens: the cached backdrop is an 85 MB texture on smart. Keep Qt's
+  // paint clip narrow while retaining full repaints for actual drags/modes.
+  if (phase_ == Phase::Select && !dragging_ && !windowMode_ &&
+      previousRecentsOpen == recentsOpen_) {
+    QRegion dirty;
+    const auto addCrosshair = [this, &dirty](const QPointF &point) {
+      dirty += QRect(qRound(point.x()) - 2, 0, 5, height());
+      dirty += QRect(0, qRound(point.y()) - 2, width(), 5);
+    };
+    addCrosshair(previousCursor);
+    addCrosshair(cursor_);
+
+    QFont badgeFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    badgeFont.setPixelSize(12);
+    badgeFont.setBold(true);
+    const QString measure = measurementText();
+    const QString previousMeasure =
+        selection_.isEmpty() && !previousRecentsOpen
+            ? formatPixelPoint(sourcePoint(previousCursor))
+            : measure;
+    dirty += measureBadgeRect(rect(), previousCursor, previousMeasure, badgeFont)
+                 .adjusted(-2, -2, 2, 2)
+                 .toAlignedRect();
+    dirty += measureBadgeRect(rect(), cursor_, measure, badgeFont)
+                 .adjusted(-2, -2, 2, 2)
+                 .toAlignedRect();
+
+    const QVector<CaptureTab> tabs = selectTabItems();
+    if (!tabs.isEmpty())
+      dirty += tabs.constFirst().rect.united(tabs.constLast().rect)
+                   .adjusted(-8, -32, 8, 8)
+                   .toAlignedRect();
+    if (previousHoveredRecent != hoveredRecent_ || recentsOpen_)
+      dirty += recentsHotZone().toAlignedRect();
+    update(dirty);
+  } else {
+    update();
+  }
 }
 
 void CaptureEditor::mouseDoubleClickEvent(QMouseEvent *event) {
