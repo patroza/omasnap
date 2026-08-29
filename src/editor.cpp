@@ -3529,6 +3529,7 @@ void CaptureEditor::keyReleaseEvent(QKeyEvent *event) {
 
 void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
   const QPointF previousCursor = cursor_;
+  const QRectF previousSelection = selection_;
   const bool previousRecentsOpen = recentsOpen_;
   const int previousHoveredRecent = hoveredRecent_;
   if (panning_) {
@@ -3812,12 +3813,44 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
     }
   }
   updatePointerCursor();
-  // An idle region-selection move changes only the crosshair, measurement
-  // badge, tabs, and (occasionally) recent-card hover. Asking QWidget to
-  // invalidate the full output here is particularly expensive on HiDPI 6K
-  // screens: the cached backdrop is an 85 MB texture on smart. Keep Qt's
-  // paint clip narrow while retaining full repaints for actual drags/modes.
-  if (phase_ == Phase::Select && !dragging_ && !windowMode_ &&
+  // Region selection changes only the hole's delta, its outline, the
+  // measurement badge, and the tabs. Asking QWidget to invalidate the full
+  // output here is particularly expensive on HiDPI 6K screens: the cached
+  // backdrop is an 85 MB texture on smart. Keep Qt's paint clip narrow.
+  if (phase_ == Phase::Select && dragging_ && !windowMode_ &&
+      !recentsOpen_) {
+    const QRect oldHole = previousSelection.toAlignedRect().intersected(rect());
+    const QRect newHole = selection_.toAlignedRect().intersected(rect());
+    QRegion dirty = QRegion(oldHole).xored(QRegion(newHole));
+    const auto addOutline = [&dirty](const QRect &hole) {
+      if (hole.isEmpty())
+        return;
+      const QRegion outer(hole.adjusted(-3, -3, 3, 3));
+      const QRegion inner(hole.adjusted(3, 3, -3, -3));
+      dirty += outer.subtracted(inner);
+    };
+    addOutline(oldHole);
+    addOutline(newHole);
+
+    QFont badgeFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    badgeFont.setPixelSize(12);
+    badgeFont.setBold(true);
+    const QString previousMeasure =
+        formatPixelSize(sourceRect(previousSelection).size());
+    dirty += measureBadgeRect(rect(), previousCursor, previousMeasure, badgeFont)
+                 .adjusted(-2, -2, 2, 2)
+                 .toAlignedRect();
+    dirty += measureBadgeRect(rect(), cursor_, measurementText(), badgeFont)
+                 .adjusted(-2, -2, 2, 2)
+                 .toAlignedRect();
+
+    const QVector<CaptureTab> tabs = selectTabItems();
+    if (!tabs.isEmpty())
+      dirty += tabs.constFirst().rect.united(tabs.constLast().rect)
+                   .adjusted(-8, -32, 8, 8)
+                   .toAlignedRect();
+    update(dirty);
+  } else if (phase_ == Phase::Select && !dragging_ && !windowMode_ &&
       previousRecentsOpen == recentsOpen_) {
     QRegion dirty;
     const auto addCrosshair = [this, &dirty](const QPointF &point) {
